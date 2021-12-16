@@ -19,7 +19,7 @@ package org.apache.spark.sql.execution.datasources.parquet;
 
 import org.apache.spark.sql.execution.vectorized.Dictionary;
 
-public class ParquetDictionaryWrapper implements Dictionary {
+public final class ParquetDictionaryWrapper implements Dictionary {
   private org.apache.parquet.column.Dictionary dictionary;
 
   public ParquetDictionaryWrapper(org.apache.parquet.column.Dictionary dictionary) {
@@ -49,9 +49,5 @@ public class ParquetDictionaryWrapper implements Dictionary {
   @Override
   public byte[] decodeToBinary(int id) {
     return dictionary.decodeToBinary(id).getBytes();
-  }
-
-  public int getMaxId() {
-    return dictionary.getMaxId();
   }
 }

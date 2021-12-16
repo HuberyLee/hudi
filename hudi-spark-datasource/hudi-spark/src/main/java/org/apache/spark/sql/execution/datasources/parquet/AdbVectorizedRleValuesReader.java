@@ -17,9 +17,6 @@
 
 package org.apache.spark.sql.execution.datasources.parquet;
 
-import java.io.IOException;
-import java.nio.ByteBuffer;
-
 import org.apache.parquet.Preconditions;
 import org.apache.parquet.bytes.ByteBufferInputStream;
 import org.apache.parquet.bytes.BytesUtils;
@@ -28,13 +25,28 @@ import org.apache.parquet.column.values.bitpacking.BytePacker;
 import org.apache.parquet.column.values.bitpacking.Packer;
 import org.apache.parquet.io.ParquetDecodingException;
 import org.apache.parquet.io.api.Binary;
-
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector;
 
-public class SkippableVectorizedRleValuesReader extends ValuesReader
-        implements SkippableVectorizedValuesReader {
+import java.io.IOException;
+import java.nio.ByteBuffer;
 
-  protected enum MODE {
+/**
+ * A values reader for Parquet's run-length encoded data. This is based off of the version in
+ * parquet-mr with these changes:
+ * - Supports the vectorized interface.
+ * - Works on byte arrays(byte[]) instead of making byte streams.
+ * <p>
+ * This encoding is used in multiple places:
+ * - Definition/Repetition levels
+ * - Dictionary ids.
+ */
+public final class AdbVectorizedRleValuesReader extends ValuesReader
+    implements AdbVectorizedValuesReader {
+  // Current decoding mode. The encoded data contains groups of either run length encoded data
+  // (RLE) or bit packed data. Each group contains a header that indicates which group it is and
+  // the number of values in the group.
+  // More details here: https://github.com/Parquet/parquet-format/blob/master/Encodings.md
+  private enum MODE {
     RLE,
     PACKED
   }
@@ -48,38 +60,35 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
   private BytePacker packer;
 
   // Current decoding mode and values
-  protected SkippableVectorizedRleValuesReader.MODE mode;
-  protected int currentCount;
-  protected int currentValue;
+  private MODE mode;
+  private int currentCount;
+  private int currentValue;
 
   // Buffer of decoded values if the values are PACKED.
-  protected int[] currentBuffer = new int[16];
-  protected int currentBufferIdx = 0;
+  private int[] currentBuffer = new int[16];
+  private int currentBufferIdx = 0;
 
   // If true, the bit width is fixed. This decoder is used in different places and this also
   // controls if we need to read the bitwidth from the beginning of the data stream.
   private final boolean fixedWidth;
   private final boolean readLength;
 
-  private static final String UNSUPPORTED_OP_MSG = "only skipIntegers is valid.";
-
-  public SkippableVectorizedRleValuesReader() {
+  public AdbVectorizedRleValuesReader() {
     this.fixedWidth = false;
     this.readLength = false;
   }
 
-  public SkippableVectorizedRleValuesReader(int bitWidth) {
+  public AdbVectorizedRleValuesReader(int bitWidth) {
     this.fixedWidth = true;
     this.readLength = bitWidth != 0;
     init(bitWidth);
   }
 
-  public SkippableVectorizedRleValuesReader(int bitWidth, boolean readLength) {
+  public AdbVectorizedRleValuesReader(int bitWidth, boolean readLength) {
     this.fixedWidth = true;
     this.readLength = readLength;
     init(bitWidth);
   }
-
 
   @Override
   public void initFromPage(int valueCount, ByteBufferInputStream in) throws IOException {
@@ -98,7 +107,7 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
     }
     if (bitWidth == 0) {
       // 0 bit width, treat this as an RLE run of valueCount number of 0's.
-      this.mode = SkippableVectorizedRleValuesReader.MODE.RLE;
+      this.mode = MODE.RLE;
       this.currentCount = valueCount;
       this.currentValue = 0;
     } else {
@@ -115,7 +124,6 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
     this.bytesWidth = BytesUtils.paddedByteCountFromBits(bitWidth);
     this.packer = Packer.LITTLE_ENDIAN.newBytePacker(bitWidth);
   }
-
 
   @Override
   public boolean readBoolean() {
@@ -134,7 +142,9 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
 
   @Override
   public int readInteger() {
-    if (this.currentCount == 0) { this.readNextGroup(); }
+    if (this.currentCount == 0) {
+      this.readNextGroup();
+    }
 
     this.currentCount--;
     switch (mode) {
@@ -152,20 +162,20 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
    * If the value is null, c will be populated with `nullValue`. Note that `nullValue` is only
    * necessary for readIntegers because we also use it to decode dictionaryIds and want to make
    * sure it always has a value in range.
-   *
+   * <p>
    * This is a batched version of this logic:
-   *  if (this.readInt() == level) {
-   *    c[rowId] = data.readInteger();
-   *  } else {
-   *    c[rowId] = null;
-   *  }
+   * if (this.readInt() == level) {
+   * c[rowId] = data.readInteger();
+   * } else {
+   * c[rowId] = null;
+   * }
    */
   public void readIntegers(
-          int total,
-          WritableColumnVector c,
-          int rowId,
-          int level,
-          VectorizedValuesReader data) throws IOException {
+      int total,
+      WritableColumnVector c,
+      int rowId,
+      int level,
+      AdbVectorizedValuesReader data) throws IOException {
     int left = total;
     while (left > 0) {
       if (this.currentCount == 0) this.readNextGroup();
@@ -194,51 +204,13 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
     }
   }
 
-  // A fork of `readIntegers`, which rebases the date int value (days) before filling
-  // the Spark column vector.
-  public void readIntegersWithRebase(
-          int total,
-          WritableColumnVector c,
-          int rowId,
-          int level,
-          VectorizedValuesReader data,
-          final boolean failIfRebase) throws IOException {
-    int left = total;
-    while (left > 0) {
-      if (this.currentCount == 0) this.readNextGroup();
-      int n = Math.min(left, this.currentCount);
-      switch (mode) {
-        case RLE:
-          if (currentValue == level) {
-            data.readIntegers(n, c, rowId);
-          } else {
-            c.putNulls(rowId, n);
-          }
-          break;
-        case PACKED:
-          for (int i = 0; i < n; ++i) {
-            if (currentBuffer[currentBufferIdx++] == level) {
-              int julianDays = data.readInteger();
-              c.putInt(rowId + i, julianDays);
-            } else {
-              c.putNull(rowId + i);
-            }
-          }
-          break;
-      }
-      rowId += n;
-      left -= n;
-      currentCount -= n;
-    }
-  }
-
   // TODO: can this code duplication be removed without a perf penalty?
   public void readBooleans(
-          int total,
-          WritableColumnVector c,
-          int rowId,
-          int level,
-          VectorizedValuesReader data) throws IOException {
+      int total,
+      WritableColumnVector c,
+      int rowId,
+      int level,
+      AdbVectorizedValuesReader data) throws IOException {
     int left = total;
     while (left > 0) {
       if (this.currentCount == 0) this.readNextGroup();
@@ -268,11 +240,11 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
   }
 
   public void readBytes(
-          int total,
-          WritableColumnVector c,
-          int rowId,
-          int level,
-          VectorizedValuesReader data) throws IOException {
+      int total,
+      WritableColumnVector c,
+      int rowId,
+      int level,
+      AdbVectorizedValuesReader data) throws IOException {
     int left = total;
     while (left > 0) {
       if (this.currentCount == 0) this.readNextGroup();
@@ -302,11 +274,11 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
   }
 
   public void readShorts(
-          int total,
-          WritableColumnVector c,
-          int rowId,
-          int level,
-          VectorizedValuesReader data) throws IOException {
+      int total,
+      WritableColumnVector c,
+      int rowId,
+      int level,
+      AdbVectorizedValuesReader data) throws IOException {
     int left = total;
     while (left > 0) {
       if (this.currentCount == 0) this.readNextGroup();
@@ -315,7 +287,7 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
         case RLE:
           if (currentValue == level) {
             for (int i = 0; i < n; i++) {
-              c.putShort(rowId + i, (short)data.readInteger());
+              c.putShort(rowId + i, (short) data.readInteger());
             }
           } else {
             c.putNulls(rowId, n);
@@ -324,7 +296,7 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
         case PACKED:
           for (int i = 0; i < n; ++i) {
             if (currentBuffer[currentBufferIdx++] == level) {
-              c.putShort(rowId + i, (short)data.readInteger());
+              c.putShort(rowId + i, (short) data.readInteger());
             } else {
               c.putNull(rowId + i);
             }
@@ -338,11 +310,11 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
   }
 
   public void readLongs(
-          int total,
-          WritableColumnVector c,
-          int rowId,
-          int level,
-          VectorizedValuesReader data) throws IOException {
+      int total,
+      WritableColumnVector c,
+      int rowId,
+      int level,
+      AdbVectorizedValuesReader data) throws IOException {
     int left = total;
     while (left > 0) {
       if (this.currentCount == 0) this.readNextGroup();
@@ -371,50 +343,12 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
     }
   }
 
-  // A fork of `readLongs`, which rebases the timestamp long value (microseconds) before filling
-  // the Spark column vector.
-  public void readLongsWithRebase(
-          int total,
-          WritableColumnVector c,
-          int rowId,
-          int level,
-          VectorizedValuesReader data,
-          final boolean failIfRebase) throws IOException {
-    int left = total;
-    while (left > 0) {
-      if (this.currentCount == 0) this.readNextGroup();
-      int n = Math.min(left, this.currentCount);
-      switch (mode) {
-        case RLE:
-          if (currentValue == level) {
-            data.readLongs(n, c, rowId);
-          } else {
-            c.putNulls(rowId, n);
-          }
-          break;
-        case PACKED:
-          for (int i = 0; i < n; ++i) {
-            if (currentBuffer[currentBufferIdx++] == level) {
-              long julianMicros = data.readLong();
-              c.putLong(rowId + i, julianMicros);
-            } else {
-              c.putNull(rowId + i);
-            }
-          }
-          break;
-      }
-      rowId += n;
-      left -= n;
-      currentCount -= n;
-    }
-  }
-
   public void readFloats(
-          int total,
-          WritableColumnVector c,
-          int rowId,
-          int level,
-          VectorizedValuesReader data) throws IOException {
+      int total,
+      WritableColumnVector c,
+      int rowId,
+      int level,
+      AdbVectorizedValuesReader data) throws IOException {
     int left = total;
     while (left > 0) {
       if (this.currentCount == 0) this.readNextGroup();
@@ -444,11 +378,11 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
   }
 
   public void readDoubles(
-          int total,
-          WritableColumnVector c,
-          int rowId,
-          int level,
-          VectorizedValuesReader data) throws IOException {
+      int total,
+      WritableColumnVector c,
+      int rowId,
+      int level,
+      AdbVectorizedValuesReader data) throws IOException {
     int left = total;
     while (left > 0) {
       if (this.currentCount == 0) this.readNextGroup();
@@ -478,11 +412,11 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
   }
 
   public void readBinarys(
-          int total,
-          WritableColumnVector c,
-          int rowId,
-          int level,
-          VectorizedValuesReader data) throws IOException {
+      int total,
+      WritableColumnVector c,
+      int rowId,
+      int level,
+      AdbVectorizedValuesReader data) throws IOException {
     int left = total;
     while (left > 0) {
       if (this.currentCount == 0) this.readNextGroup();
@@ -516,12 +450,12 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
    * populated into `nulls`.
    */
   public void readIntegers(
-          int total,
-          WritableColumnVector values,
-          WritableColumnVector nulls,
-          int rowId,
-          int level,
-          VectorizedValuesReader data) throws IOException {
+      int total,
+      WritableColumnVector values,
+      WritableColumnVector nulls,
+      int rowId,
+      int level,
+      AdbVectorizedValuesReader data) throws IOException {
     int left = total;
     while (left > 0) {
       if (this.currentCount == 0) this.readNextGroup();
@@ -675,11 +609,10 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
   /**
    * Reads the next group.
    */
-  protected void readNextGroup() {
+  private void readNextGroup() {
     try {
       int header = readUnsignedVarInt();
-      this.mode = (header & 1) == 0 ? SkippableVectorizedRleValuesReader.MODE.RLE :
-              SkippableVectorizedRleValuesReader.MODE.PACKED;
+      this.mode = (header & 1) == 0 ? MODE.RLE : MODE.PACKED;
       switch (mode) {
         case RLE:
           this.currentCount = header >>> 1;
@@ -707,272 +640,5 @@ public class SkippableVectorizedRleValuesReader extends ValuesReader
     } catch (IOException e) {
       throw new ParquetDecodingException("Failed to read from input stream", e);
     }
-  }
-
-  public void skipIntegers(int total, int level, SkippableVectorizedValuesReader data) {
-    int left = total;
-    while (left > 0) {
-      if (this.currentCount == 0) this.readNextGroup();
-      int n = Math.min(left, this.currentCount);
-      switch (mode) {
-        case RLE:
-          if (currentValue == level) {
-            data.skipIntegers(n);
-          }
-          break;
-        case PACKED:
-          for (int i = 0; i < n; ++i) {
-            if (currentBuffer[currentBufferIdx++] == level) {
-              data.skipInteger();
-            }
-          }
-          break;
-      }
-      left -= n;
-      currentCount -= n;
-    }
-  }
-
-  public void skipBooleans(int total, int level, SkippableVectorizedValuesReader data) {
-    int left = total;
-    while (left > 0) {
-      if (this.currentCount == 0) this.readNextGroup();
-      int n = Math.min(left, this.currentCount);
-      switch (mode) {
-        case RLE:
-          if (currentValue == level) {
-            data.skipBooleans(n);
-          }
-          break;
-        case PACKED:
-          for (int i = 0; i < n; ++i) {
-            if (currentBuffer[currentBufferIdx++] == level) {
-              data.skipBoolean();
-            }
-          }
-          break;
-      }
-      left -= n;
-      currentCount -= n;
-    }
-  }
-
-  public void skipBytes(int total, int level, SkippableVectorizedValuesReader data) {
-    int left = total;
-    while (left > 0) {
-      if (this.currentCount == 0) this.readNextGroup();
-      int n = Math.min(left, this.currentCount);
-      switch (mode) {
-        case RLE:
-          if (currentValue == level) {
-            data.skipBytes(n);
-          }
-          break;
-        case PACKED:
-          for (int i = 0; i < n; ++i) {
-            if (currentBuffer[currentBufferIdx++] == level) {
-              data.skipByte();
-            }
-          }
-          break;
-      }
-      left -= n;
-      currentCount -= n;
-    }
-  }
-
-  public void skipShorts(int total, int level, SkippableVectorizedValuesReader data) {
-    skipIntegers(total, level, data);
-  }
-
-  public void skipLongs(int total, int level, SkippableVectorizedValuesReader data) {
-    int left = total;
-    while (left > 0) {
-      if (this.currentCount == 0) this.readNextGroup();
-      int n = Math.min(left, this.currentCount);
-      switch (mode) {
-        case RLE:
-          if (currentValue == level) {
-            data.skipLongs(n);
-          }
-          break;
-        case PACKED:
-          for (int i = 0; i < n; ++i) {
-            if (currentBuffer[currentBufferIdx++] == level) {
-              data.skipLong();
-            }
-          }
-          break;
-      }
-      left -= n;
-      currentCount -= n;
-    }
-  }
-
-  public void skipFloats(int total, int level, SkippableVectorizedValuesReader data) {
-    int left = total;
-    while (left > 0) {
-      if (this.currentCount == 0) this.readNextGroup();
-      int n = Math.min(left, this.currentCount);
-      switch (mode) {
-        case RLE:
-          if (currentValue == level) {
-            data.skipFloats(n);
-          }
-          break;
-        case PACKED:
-          for (int i = 0; i < n; ++i) {
-            if (currentBuffer[currentBufferIdx++] == level) {
-              data.skipFloat();
-            }
-          }
-          break;
-      }
-      left -= n;
-      currentCount -= n;
-    }
-  }
-
-  public void skipDoubles(int total, int level, SkippableVectorizedValuesReader data) {
-    int left = total;
-    while (left > 0) {
-      if (this.currentCount == 0) this.readNextGroup();
-      int n = Math.min(left, this.currentCount);
-      switch (mode) {
-        case RLE:
-          if (currentValue == level) {
-            data.skipDoubles(n);
-          }
-          break;
-        case PACKED:
-          for (int i = 0; i < n; ++i) {
-            if (currentBuffer[currentBufferIdx++] == level) {
-              data.skipDouble();
-            }
-          }
-          break;
-      }
-      left -= n;
-      currentCount -= n;
-    }
-  }
-
-
-  public void skipBinarys(int total, int level, SkippableVectorizedValuesReader data) {
-    int left = total;
-    while (left > 0) {
-      if (this.currentCount == 0) this.readNextGroup();
-      int n = Math.min(left, this.currentCount);
-      switch (mode) {
-        case RLE:
-          if (currentValue == level) {
-            data.skipBinary(n);
-          }
-          break;
-        case PACKED:
-          for (int i = 0; i < n; ++i) {
-            if (currentBuffer[currentBufferIdx++] == level) {
-              data.skipBinary(1);
-            }
-          }
-          break;
-      }
-      left -= n;
-      currentCount -= n;
-    }
-  }
-
-  @Override
-  public void skipBoolean() {
-    this.skipInteger();
-  }
-
-  @Override
-  public void skipInteger() {
-    if (this.currentCount == 0) { this.readNextGroup(); }
-
-    this.currentCount--;
-    switch (mode) {
-      case RLE:
-        break;
-      case PACKED:
-        currentBufferIdx++;
-        break;
-      default:
-        throw new RuntimeException("Unreachable");
-    }
-  }
-
-  @Override
-  public void skipIntegers(int total) {
-    int left = total;
-    while (left > 0) {
-      if (this.currentCount == 0) this.readNextGroup();
-      int n = Math.min(left, this.currentCount);
-      switch (mode) {
-        case RLE:
-          break;
-        case PACKED:
-          currentBufferIdx += n;
-          break;
-      }
-      left -= n;
-      currentCount -= n;
-    }
-  }
-
-  @Override
-  public void skipByte() {
-    throw new UnsupportedOperationException(UNSUPPORTED_OP_MSG);
-  }
-
-  @Override
-  public void skipBooleans(int total) {
-    throw new UnsupportedOperationException(UNSUPPORTED_OP_MSG);
-  }
-
-  @Override
-  public void skipBytes(int total) {
-    throw new UnsupportedOperationException(UNSUPPORTED_OP_MSG);
-  }
-
-  @Override
-  public void skipLongs(int total) {
-    throw new UnsupportedOperationException(UNSUPPORTED_OP_MSG);
-  }
-
-  @Override
-  public void skipFloats(int total) {
-    throw new UnsupportedOperationException(UNSUPPORTED_OP_MSG);
-  }
-
-  @Override
-  public void skipDoubles(int total) {
-    throw new UnsupportedOperationException(UNSUPPORTED_OP_MSG);
-  }
-
-  @Override
-  public void skipBinary(int total) {
-    throw new UnsupportedOperationException(UNSUPPORTED_OP_MSG);
-  }
-
-  @Override
-  public void skipLong() {
-    throw new UnsupportedOperationException(UNSUPPORTED_OP_MSG);
-  }
-
-  @Override
-  public void skipFloat() {
-    throw new UnsupportedOperationException(UNSUPPORTED_OP_MSG);
-  }
-
-  @Override
-  public void skipDouble() {
-    throw new UnsupportedOperationException(UNSUPPORTED_OP_MSG);
-  }
-
-  @Override
-  public void skipBinaryByLen(int len) {
-    throw new UnsupportedOperationException(UNSUPPORTED_OP_MSG);
   }
 }

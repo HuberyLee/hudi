@@ -1,23 +1,8 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.
- * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package org.apache.spark.sql.execution
 
+import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{BlockLocation, FileStatus, LocatedFileStatus, Path}
+import org.apache.parquet.hadoop.util.SerializationUtil
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.catalog.BucketSpec
@@ -25,12 +10,14 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
+import org.apache.spark.sql.execution.AdbConstant.{ADB_PREWHERE_OUTPUT, ADB_PREWHERE_PREDICATE}
 import org.apache.spark.sql.execution.datasources._
 import org.apache.spark.sql.execution.datasources.parquet.{ParquetFileFormat => ParquetSource}
 import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.util.collection.BitSet
 
+import java.io.IOException
 import scala.collection.mutable.ArrayBuffer
 
 /**
@@ -44,15 +31,16 @@ import scala.collection.mutable.ArrayBuffer
  * @param dataFilters       Filters on non-partition columns.
  * @param tableIdentifier   identifier for the table in the metastore.
  */
-case class HoodieFileSourceScanExec(
+case class AdbFileSourceScanExec(
                                   @transient relation: HadoopFsRelation,
                                   output: Seq[Attribute],
                                   requiredSchema: StructType,
                                   partitionFilters: Seq[Expression],
                                   optionalBucketSet: Option[BitSet],
+                                  prewhereFilters: Seq[Expression],
                                   dataFilters: Seq[Expression],
                                   override val tableIdentifier: Option[TableIdentifier])
-  extends DataSourceScanExec with ColumnarBatchScan {
+  extends DataSourceScanExec with PredicateHelper with ColumnarBatchScan {
 
   // Note that some vals referring the file-based relation are lazy intentionally
   // so that this plan can be canonicalized on executor side too. See SPARK-23731.
@@ -168,6 +156,7 @@ case class HoodieFileSourceScanExec(
         "Batched" -> supportsBatch.toString,
         "PartitionFilters" -> seqToString(partitionFilters),
         "PushedFilters" -> seqToString(pushedDownFilters),
+        "PrewhereFilters" -> seqToString(prewhereFilters),
         "Location" -> locationDesc)
     val withOptPartitionCount =
       relation.partitionSchemaOption.map { _ =>
@@ -192,8 +181,29 @@ case class HoodieFileSourceScanExec(
   }
 
   private lazy val inputRDD: RDD[InternalRow] = {
+    def setPrewherePredicate(configuration: Configuration,
+                             prewhereFilters: Seq[Expression], output: Seq[Attribute]): Unit = {
+      try {
+        SerializationUtil.writeObjectToConfAsBase64(
+          ADB_PREWHERE_PREDICATE, prewhereFilters, configuration)
+        SerializationUtil.writeObjectToConfAsBase64(
+          ADB_PREWHERE_OUTPUT, output, configuration)
+      } catch {
+        case e: IOException =>
+          throw new RuntimeException("Set prewhere filters failed.", e)
+      }
+    }
+
+    // TODO: add prewhere metrics
     // Update metrics for taking effect in both code generation node and normal node.
     updateDriverMetrics()
+    // Inject prewhere predicates into hadoop config, so we don't
+    // need to modify the [[buildReaderWithPartitionValues]] interface.
+    // And if we don't take prewhere metrics into consideration,
+    // we can move it to HoodieFileSourceStrategy before construct FileSourceScanExec.
+    val hadoopConf = relation.sparkSession.sessionState.newHadoopConfWithOptions(relation.options)
+    setPrewherePredicate(hadoopConf, prewhereFilters, output)
+
     val readFile: (PartitionedFile) => Iterator[InternalRow] =
       relation.fileFormat.buildReaderWithPartitionValues(
         sparkSession = relation.sparkSession,
@@ -202,8 +212,7 @@ case class HoodieFileSourceScanExec(
         requiredSchema = requiredSchema,
         filters = pushedDownFilters,
         options = relation.options,
-        hadoopConf = relation.sparkSession.sessionState.newHadoopConfWithOptions(relation.options))
-
+        hadoopConf = hadoopConf)
     relation.bucketSpec match {
       case Some(bucketing) if relation.sparkSession.sessionState.conf.bucketingEnabled =>
         createBucketedReadRDD(bucketing, readFile, selectedPartitions, relation)
@@ -423,13 +432,14 @@ case class HoodieFileSourceScanExec(
       metrics("numFiles") :: metrics("metadataTime") :: Nil)
   }
 
-  override def doCanonicalize(): HoodieFileSourceScanExec = {
-    HoodieFileSourceScanExec(
+  override def doCanonicalize(): AdbFileSourceScanExec = {
+    AdbFileSourceScanExec(
       relation,
       output.map(QueryPlan.normalizeExprId(_, output)),
       requiredSchema,
       QueryPlan.normalizePredicates(partitionFilters, output),
       optionalBucketSet,
+      QueryPlan.normalizePredicates(prewhereFilters, output),
       QueryPlan.normalizePredicates(dataFilters, output),
       None)
   }
