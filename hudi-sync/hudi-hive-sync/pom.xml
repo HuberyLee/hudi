@@ -165,6 +165,12 @@
       <artifactId>jetty-all</artifactId>
       <scope>test</scope>
       <version>${jetty.version}</version>
+      <exclusions>
+        <exclusion>
+          <artifactId>servlet-api</artifactId>
+          <groupId>javax.servlet</groupId>
+        </exclusion>
+      </exclusions>
     </dependency>
 
     <dependency>

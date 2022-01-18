@@ -539,7 +539,7 @@
         <groupId>org.apache.avro</groupId>
         <artifactId>avro</artifactId>
         <version>${avro.version}</version>
-        <scope>provided</scope>
+<!--        <scope>provided</scope>-->
       </dependency>
 
       <!-- Parquet -->
@@ -547,7 +547,7 @@
         <groupId>org.apache.parquet</groupId>
         <artifactId>parquet-avro</artifactId>
         <version>${parquet.version}</version>
-        <scope>provided</scope>
+<!--        <scope>provided</scope>-->
       </dependency>
 
       <!-- Spark -->
@@ -555,13 +555,13 @@
         <groupId>org.apache.spark</groupId>
         <artifactId>spark-core_${scala.binary.version}</artifactId>
         <version>${spark.version}</version>
-        <scope>provided</scope>
+<!--        <scope>provided</scope>-->
       </dependency>
       <dependency>
         <groupId>org.apache.spark</groupId>
         <artifactId>spark-sql_${scala.binary.version}</artifactId>
         <version>${spark.version}</version>
-        <scope>provided</scope>
+<!--        <scope>provided</scope>-->
       </dependency>
       <dependency>
         <groupId>org.apache.spark</groupId>
@@ -596,7 +596,7 @@
         <groupId>org.apache.spark</groupId>
         <artifactId>spark-avro_${scala.binary.version}</artifactId>
         <version>${spark.version}</version>
-        <scope>provided</scope>
+<!--        <scope>provided</scope>-->
       </dependency>
 
       <!-- Flink -->
@@ -747,7 +747,7 @@
         <groupId>org.apache.hadoop</groupId>
         <artifactId>hadoop-common</artifactId>
         <version>${hadoop.version}</version>
-        <scope>provided</scope>
+<!--        <scope>provided</scope>-->
         <exclusions>
           <exclusion>
             <groupId>jdk.tools</groupId>
@@ -757,29 +757,43 @@
             <groupId>javax.xml.bind</groupId>
             <artifactId>jaxb-api</artifactId>
           </exclusion>
+          <exclusion>
+            <artifactId>servlet-api</artifactId>
+            <groupId>javax.servlet</groupId>
+          </exclusion>
         </exclusions>
       </dependency>
       <dependency>
         <groupId>org.apache.hadoop</groupId>
         <artifactId>hadoop-hdfs</artifactId>
         <version>${hadoop.version}</version>
-        <scope>provided</scope>
+<!--        <scope>provided</scope>-->
+        <exclusions>
+          <exclusion>
+            <artifactId>servlet-api</artifactId>
+            <groupId>javax.servlet</groupId>
+          </exclusion>
+        </exclusions>
       </dependency>
       <dependency>
         <groupId>org.apache.hadoop</groupId>
         <artifactId>hadoop-auth</artifactId>
         <version>${hadoop.version}</version>
-        <scope>provided</scope>
+<!--        <scope>provided</scope>-->
       </dependency>
       <dependency>
         <groupId>org.apache.hadoop</groupId>
         <artifactId>hadoop-mapreduce-client-core</artifactId>
         <version>${hadoop.version}</version>
-        <scope>provided</scope>
+<!--        <scope>provided</scope>-->
         <exclusions>
           <exclusion>
             <groupId>javax.xml.bind</groupId>
             <artifactId>jaxb-api</artifactId>
+          </exclusion>
+          <exclusion>
+            <artifactId>servlet-api</artifactId>
+            <groupId>javax.servlet</groupId>
           </exclusion>
         </exclusions>
       </dependency>
@@ -793,6 +807,10 @@
             <groupId>javax.xml.bind</groupId>
             <artifactId>jaxb-api</artifactId>
           </exclusion>
+          <exclusion>
+            <artifactId>servlet-api</artifactId>
+            <groupId>javax.servlet</groupId>
+          </exclusion>
         </exclusions>
       </dependency>
       <dependency>
@@ -801,6 +819,12 @@
         <classifier>tests</classifier>
         <scope>test</scope>
         <version>${hadoop.version}</version>
+        <exclusions>
+          <exclusion>
+            <artifactId>servlet-api</artifactId>
+            <groupId>javax.servlet</groupId>
+          </exclusion>
+        </exclusions>
       </dependency>
       <dependency>
         <groupId>org.apache.hadoop</groupId>
@@ -815,6 +839,10 @@
           <exclusion>
             <groupId>javax.xml.bind</groupId>
             <artifactId>jaxb-api</artifactId>
+          </exclusion>
+          <exclusion>
+            <artifactId>servlet-api</artifactId>
+            <groupId>javax.servlet</groupId>
           </exclusion>
         </exclusions>
       </dependency>
@@ -837,6 +865,10 @@
           <exclusion>
             <groupId>org.pentaho</groupId>
             <artifactId>*</artifactId>
+          </exclusion>
+          <exclusion>
+            <artifactId>servlet-api</artifactId>
+            <groupId>javax.servlet</groupId>
           </exclusion>
         </exclusions>
       </dependency>
@@ -877,6 +909,10 @@
           <exclusion>
             <groupId>org.eclipse.jetty.aggregate</groupId>
             <artifactId>*</artifactId>
+          </exclusion>
+          <exclusion>
+            <artifactId>servlet-api</artifactId>
+            <groupId>javax.servlet</groupId>
           </exclusion>
         </exclusions>
       </dependency>
@@ -936,7 +972,7 @@
         <groupId>${hive.groupid}</groupId>
         <artifactId>hive-exec</artifactId>
         <version>${hive.version}</version>
-        <scope>provided</scope>
+<!--        <scope>provided</scope>-->
         <classifier>${hive.exec.classifier}</classifier>
         <exclusions>
           <exclusion>
@@ -950,6 +986,10 @@
           <exclusion>
             <groupId>org.pentaho</groupId>
             <artifactId>*</artifactId>
+          </exclusion>
+          <exclusion>
+            <artifactId>servlet-api</artifactId>
+            <groupId>javax.servlet</groupId>
           </exclusion>
         </exclusions>
       </dependency>
